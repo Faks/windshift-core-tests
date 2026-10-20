@@ -5,8 +5,10 @@ package events
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"windshift/internal/database"
 	"windshift/internal/testutils"
@@ -266,6 +268,48 @@ func TestActiveConsumerWithoutHandlerIsStillScanned(t *testing.T) {
 	}
 	if keys := engine.eligibleHandlerKeys(); len(keys) != 1 || keys[0] != "unhandled.consumer" {
 		t.Fatalf("eligibleHandlerKeys() = %v, want the consumer the gate named", keys)
+	}
+}
+
+// Eligibility covers two ranges: pending/retry by next_attempt_at and leased by
+// lease_expires_at. The gate runs them as separate indexed branches, so a
+// regression that drops one branch leaves expired leases unclaimed until the
+// safety reconcile. Pin both branches, and pin that a delivery scheduled for
+// the future is not named.
+func TestGateNamesDueStatesOnly(t *testing.T) {
+	tdb := testutils.CreateTestDB(t, true)
+	defer tdb.Close()
+	store := NewStore(tdb)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	for _, key := range []string{"due.lease", "due.pending", "future.pending"} {
+		configureConsumer(t, store, key, "item.created")
+	}
+	event := appendEvent(t, store, testEvent("item", "9", "item.created"))
+
+	insert := func(key, state string, nextAttempt time.Time, leaseExpiry any) {
+		t.Helper()
+		if _, err := tdb.ExecWrite(
+			`INSERT INTO domain_event_deliveries (event_id, consumer_key, state, next_attempt_at, lease_expires_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			event.ID, key, state, nextAttempt, leaseExpiry); err != nil {
+			t.Fatalf("insert %s delivery for %s: %v", state, key, err)
+		}
+	}
+	insert("due.lease", "leased", now, now.Add(-time.Minute))
+	insert("due.pending", "pending", now.Add(-time.Minute), nil)
+	insert("future.pending", "pending", now.Add(time.Hour), nil)
+
+	result, err := store.Gate(context.Background(), event.ID+1, now)
+	if err != nil {
+		t.Fatalf("Gate() error = %v", err)
+	}
+	slices.Sort(result.ClaimKeys)
+	if want := []string{"due.lease", "due.pending"}; !slices.Equal(result.ClaimKeys, want) {
+		t.Fatalf("ClaimKeys = %v, want %v", result.ClaimKeys, want)
+	}
+	if len(result.ScanKeys) != 0 {
+		t.Fatalf("ScanKeys = %v, want none when every cursor is current", result.ScanKeys)
 	}
 }
 
