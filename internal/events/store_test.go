@@ -275,6 +275,11 @@ func TestEngineRenewsOwnershipWhileHandlerIsStillRunning(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
+	// processOne claims only for consumers the gate named, so the gate must run
+	// before a worker can claim the delivery this test created.
+	if _, err := engine.tick(ctx); err != nil {
+		t.Fatalf("tick() error = %v", err)
+	}
 	go func() {
 		_, err := engine.processOne(ctx)
 		done <- err
