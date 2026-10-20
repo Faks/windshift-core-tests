@@ -470,6 +470,11 @@ func TestEngineProcessesRegisteredConsumerAndReportsStats(t *testing.T) {
 		t.Fatalf("RegisterHandler() error = %v", err)
 	}
 	engine.now = func() time.Time { return time.Now().UTC().Add(time.Second) }
+	// The gate names the consumers that have work before a worker claims, so a
+	// tick must run first. This is the order the engine actually runs in.
+	if _, err := engine.tick(ctx); err != nil {
+		t.Fatalf("tick() error = %v", err)
+	}
 	worked, err := engine.processOne(ctx)
 	if err != nil {
 		t.Fatalf("processOne() error = %v", err)
@@ -509,6 +514,11 @@ func TestEngineRotatesConsumerClaimPriority(t *testing.T) {
 		}
 	}
 	engine.now = func() time.Time { return time.Now().UTC().Add(time.Second) }
+	// Workers claim only for consumers the gate named, so the gate must run
+	// before the rotation is observed.
+	if _, err := engine.tick(ctx); err != nil {
+		t.Fatalf("tick() error = %v", err)
+	}
 
 	for range 2 {
 		worked, err := engine.processOne(ctx)
