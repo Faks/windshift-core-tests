@@ -25,6 +25,9 @@ type countingDatabase struct {
 
 func (db *countingDatabase) record(kind, query string) {
 	db.statements++
+	if kind == "write" {
+		db.writes++
+	}
 	db.queries = append(db.queries, kind+" "+query)
 }
 
@@ -70,16 +73,24 @@ func TestIdleTickCostsOneStatementAndNoTransaction(t *testing.T) {
 	defer tdb.Close()
 	counter := &countingDatabase{Database: tdb}
 	engine := NewEngine(counter, gateConfig())
+	store := NewStore(counter)
 	if err := engine.RegisterHandler("gate.consumer", HandlerFunc(func(_ context.Context, _ Event) error { return nil })); err != nil {
 		t.Fatal(err)
 	}
+	configureConsumer(t, store, "gate.consumer", "item.created")
+	appendEvent(t, store, testEvent("item", "1", "item.created"))
 
-	// The first tick is a full reconcile, so it still runs one scan per consumer.
+	// The first tick is the history backstop, so it still runs one scan per
+	// consumer the gate names. Nothing is scanned for a consumer that does not
+	// exist or has no events past its cursor.
 	if _, err := engine.tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if counter.statements != 2 {
-		t.Fatalf("first tick executed %d statements, want gate plus one scan", counter.statements)
+		t.Fatalf("first tick executed %d statements, want gate plus one scan: %v", counter.statements, counter.queries)
+	}
+	if counter.writes != 1 {
+		t.Fatalf("first tick executed %d writes, want the reconcile insert", counter.writes)
 	}
 
 	counter.reset()
@@ -221,6 +232,40 @@ func TestInactiveConsumerIsNotScannedOnIdleTicks(t *testing.T) {
 	}
 	if counter.writes != 0 {
 		t.Fatalf("idle tick wrote %d statements for an inactive consumer, want 0", counter.writes)
+	}
+}
+
+// The scan still covers every active consumer, not only consumers with a handler
+// in this process: deliveries must exist for a handler registered later. The gate
+// could have been narrowed to registered handlers, which would have broken this,
+// so the behavior is pinned here.
+func TestActiveConsumerWithoutHandlerIsStillScanned(t *testing.T) {
+	tdb := testutils.CreateTestDB(t, true)
+	defer tdb.Close()
+	store := NewStore(tdb)
+	configureConsumer(t, store, "unhandled.consumer", "item.created")
+	appendEvent(t, store, testEvent("item", "7", "item.created"))
+
+	engine := NewEngine(tdb, gateConfig())
+	created, err := engine.tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created != 1 {
+		t.Fatalf("tick created %d deliveries for an active consumer with no handler, want 1", created)
+	}
+	if keys := engine.eligibleHandlerKeys(); len(keys) != 0 {
+		t.Fatalf("eligibleHandlerKeys() = %v, want none before a handler is registered", keys)
+	}
+
+	// A handler registered later finds the deliveries the engine already created.
+	if err := engine.RegisterHandler("unhandled.consumer", HandlerFunc(func(_ context.Context, _ Event) error {
+		return nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if keys := engine.eligibleHandlerKeys(); len(keys) != 1 || keys[0] != "unhandled.consumer" {
+		t.Fatalf("eligibleHandlerKeys() = %v, want the consumer the gate named", keys)
 	}
 }
 
