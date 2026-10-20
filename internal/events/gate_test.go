@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
-	"time"
 
 	"windshift/internal/database"
 	"windshift/internal/testutils"
