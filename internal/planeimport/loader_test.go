@@ -789,3 +789,79 @@ func mustNumber(t *testing.T, tx database.Tx) (int, error) {
 	}
 	return int(n + 1), nil
 }
+
+// TestSkippedIssueCommentsAndRerunGaps pins two report facts that only surface
+// away from the happy path: a comment whose issue is soft-deleted is counted in
+// comments_skipped_unmapped_issue instead of vanishing, and a rerun — where
+// every issue is already mapped and nothing is written — still reports the
+// source number range and its preserved gaps rather than collapsing to zero.
+func TestSkippedIssueCommentsAndRerunGaps(t *testing.T) {
+	db := newTestDB(t)
+	meta := `{"type":"meta","meta":{"schema_version":2,"source":"plane","workspace_slug":"solum-designum","project_id":"p-1","project_key":"TEST","dumped_at":"2026-10-26T00:00:00Z"}}`
+	records := []string{
+		`{"type":"issue","issue":{"id":"k-1","sequence_id":1,"name":"kept","state_name":"Done","state_group":"completed","priority":"none","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","created_by_id":"u-gnarl","updated_by_id":"u-gnarl"}}`,
+		// Soft-deleted, and the highest number in the contract: its number is a
+		// reserved gap, so the range must extend past it.
+		`{"type":"issue","issue":{"id":"k-2","sequence_id":2,"name":"removed","state_name":"Done","state_group":"completed","priority":"none","created_at":"2024-01-02T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","deleted_at":"2024-01-03T00:00:00Z","created_by_id":"u-gnarl","updated_by_id":"u-gnarl"}}`,
+		`{"type":"comment","comment":{"id":"kc-1","issue_id":"k-2","comment_json":"","comment_html":"","text":"orphaned","created_at":"2024-01-03T00:00:00Z","updated_at":"2024-01-03T00:00:00Z","created_by_id":"u-gnarl","access":"INTERNAL"}}`,
+	}
+	contractPath := writeContract(t, meta, records...)
+	newLoader := func() *Loader {
+		return NewLoader(db, Options{
+			WorkspaceKey: "TEST", ContractPath: contractPath, UsersPath: writeUsers(t),
+			Aliases: map[string]string{"hakerx1@gmail.com": "oskars_germovs@inbox.lv"},
+		})
+	}
+
+	l := newLoader()
+	if err := l.LoadContract(); err != nil {
+		t.Fatalf("load contract: %v", err)
+	}
+	if err := l.Resolve(); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	report, err := l.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if report.IssuesImported != 1 || report.IssuesSoftDeleted != 1 {
+		t.Errorf("imported/soft-deleted = %d/%d, want 1/1", report.IssuesImported, report.IssuesSoftDeleted)
+	}
+	if report.CommentsSkipped != 1 {
+		t.Errorf("comments skipped = %d, want 1 (a comment on a soft-deleted issue must be counted, not dropped)", report.CommentsSkipped)
+	}
+	if report.CommentsImported != 0 || report.CommentsExisting != 0 {
+		t.Errorf("comments imported/existing = %d/%d, want 0/0", report.CommentsImported, report.CommentsExisting)
+	}
+	if report.MaxNumber != 2 {
+		t.Errorf("max number = %d, want 2 (the soft-deleted #2 still holds its number)", report.MaxNumber)
+	}
+	if len(report.NumberGaps) != 1 || report.NumberGaps[0] != 2 {
+		t.Errorf("gaps = %v, want [2]", report.NumberGaps)
+	}
+
+	// Rerun: nothing to write, but the range and its gap must still be reported.
+	l2 := newLoader()
+	if err := l2.LoadContract(); err != nil {
+		t.Fatalf("rerun load: %v", err)
+	}
+	if err := l2.Resolve(); err != nil {
+		t.Fatalf("rerun resolve: %v", err)
+	}
+	report2, err := l2.Run(context.Background())
+	if err != nil {
+		t.Fatalf("rerun: %v", err)
+	}
+	if report2.IssuesImported != 0 || report2.IssuesExisting != 1 {
+		t.Errorf("rerun imported/existing = %d/%d, want 0/1", report2.IssuesImported, report2.IssuesExisting)
+	}
+	if report2.CommentsSkipped != 1 {
+		t.Errorf("rerun comments skipped = %d, want 1", report2.CommentsSkipped)
+	}
+	if report2.MaxNumber != 2 {
+		t.Errorf("rerun max number = %d, want 2", report2.MaxNumber)
+	}
+	if len(report2.NumberGaps) != 1 || report2.NumberGaps[0] != 2 {
+		t.Errorf("rerun gaps = %v, want [2]", report2.NumberGaps)
+	}
+}
