@@ -865,3 +865,85 @@ func TestSkippedIssueCommentsAndRerunGaps(t *testing.T) {
 		t.Errorf("rerun gaps = %v, want [2]", report2.NumberGaps)
 	}
 }
+
+// TestEmptyCommentIsCountedAndSkippedOnRerun pins that a comment with no body
+// is not silently dropped: the run counts it and maps it, so a rerun does not
+// process it again.
+func TestEmptyCommentIsCountedAndSkippedOnRerun(t *testing.T) {
+	db := newTestDB(t)
+	meta := `{"type":"meta","meta":{"schema_version":2,"source":"plane","workspace_slug":"solum-designum","project_id":"p-1","project_key":"TEST","dumped_at":"2026-10-26T00:00:00Z"}}`
+	records := []string{
+		`{"type":"issue","issue":{"id":"i-1","sequence_id":1,"name":"has an empty comment","state_name":"Todo","state_group":"unstarted","priority":"none","created_at":"2024-01-02T03:04:05Z","updated_at":"2024-01-02T03:04:05Z","created_by_id":"","updated_by_id":""}}`,
+		`{"type":"comment","comment":{"id":"c-empty","issue_id":"i-1","comment_json":"","comment_html":"","text":"","created_at":"2024-01-03T00:00:00Z","updated_at":"2024-01-03T00:00:00Z","created_by_id":"","access":"INTERNAL"}}`,
+	}
+	contractPath := writeContract(t, meta, records...)
+	newLoader := func() *Loader {
+		return NewLoader(db, Options{WorkspaceKey: "TEST", ContractPath: contractPath})
+	}
+
+	l := newLoader()
+	if err := l.LoadContract(); err != nil {
+		t.Fatalf("load contract: %v", err)
+	}
+	if err := l.Resolve(); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	report, err := l.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if report.CommentsImported != 0 {
+		t.Errorf("comments imported = %d, want 0", report.CommentsImported)
+	}
+	if report.CommentsSkippedEmpty != 1 {
+		t.Errorf("empty comments skipped = %d, want 1", report.CommentsSkippedEmpty)
+	}
+
+	l2 := newLoader()
+	if err := l2.LoadContract(); err != nil {
+		t.Fatalf("load contract 2: %v", err)
+	}
+	if err := l2.Resolve(); err != nil {
+		t.Fatalf("resolve 2: %v", err)
+	}
+	report2, err := l2.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if report2.CommentsSkippedEmpty != 0 {
+		t.Errorf("rerun empty comments skipped = %d, want 0 (mapped)", report2.CommentsSkippedEmpty)
+	}
+	if report2.CommentsExisting != 1 {
+		t.Errorf("rerun comments existing = %d, want 1", report2.CommentsExisting)
+	}
+}
+
+// TestMissingLabelAndParentAreReported pins that references the contract never
+// carried land in missing_references, not in collisions: collisions is
+// reserved for a source number already owned by a row the importer does not own.
+func TestMissingLabelAndParentAreReported(t *testing.T) {
+	db := newTestDB(t)
+	meta := `{"type":"meta","meta":{"schema_version":2,"source":"plane","workspace_slug":"solum-designum","project_id":"p-1","project_key":"TEST","dumped_at":"2026-10-26T00:00:00Z"}}`
+	records := []string{
+		`{"type":"issue","issue":{"id":"i-1","sequence_id":1,"name":"dangling refs","state_name":"Todo","state_group":"unstarted","label_ids":["l-missing"],"priority":"none","parent_id":"i-missing","created_at":"2024-01-02T03:04:05Z","updated_at":"2024-01-02T03:04:05Z","created_by_id":"","updated_by_id":""}}`,
+	}
+	contractPath := writeContract(t, meta, records...)
+
+	l := NewLoader(db, Options{WorkspaceKey: "TEST", ContractPath: contractPath})
+	if err := l.LoadContract(); err != nil {
+		t.Fatalf("load contract: %v", err)
+	}
+	if err := l.Resolve(); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	report, err := l.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(report.MissingReferences) != 2 {
+		t.Errorf("missing references = %v, want the label and the parent", report.MissingReferences)
+	}
+	if len(report.Collisions) != 0 {
+		t.Errorf("collisions = %v, want none (missing refs are not number collisions)", report.Collisions)
+	}
+}

@@ -176,3 +176,36 @@ func TestEscapeMarkdownTextProtectsStructure(t *testing.T) {
 		t.Errorf("ordinary text was mangled: %q", got)
 	}
 }
+
+// TestConvertDescriptionJSON_CodeSpanIsLiteral pins the code-mark path: the
+// span content is not Markdown-escaped (a backslash would render inside the
+// span) and the fence grows past any backtick run so the span cannot be broken.
+func TestConvertDescriptionJSON_CodeSpanIsLiteral(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "metacharacters survive unescaped inside a code span",
+			in:   `{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"*x* _y_","marks":[{"type":"code"}]}]}]}`,
+			want: "`*x* _y_`",
+		},
+		{
+			name: "a backtick in the content grows the fence",
+			in:   "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"a`b\",\"marks\":[{\"type\":\"code\"}]}]}]}",
+			want: "``a`b``",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ConvertDescriptionJSON(tc.in)
+			if !ok {
+				t.Fatalf("code span conversion failed: %q", got)
+			}
+			if got != tc.want {
+				t.Errorf("code span = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
